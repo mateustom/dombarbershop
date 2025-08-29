@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import gspread
 from google.oauth2 import service_account
-from datetime import datetime, date, time
+from datetime import datetime, date
 import pytz
 
 st.set_page_config(page_title="Dom Barber Shop", page_icon="💈", layout="wide")
@@ -14,9 +14,7 @@ st.markdown("""
 .stApp {background: radial-gradient(1200px 600px at 10% 0%, #14141a 0%, var(--bg) 35%, #0b0b0e 100%) !important;}
 .block-container {padding-top:1.2rem; padding-bottom:3rem;}
 h1, h2, h3, h4 {color: var(--text);}
-div[data-baseweb="input"] input, .stTextArea textarea, .stSelectbox div, .stDateInput input, .stNumberInput input, .stMultiSelect div {color: var(--text) !important;}
-.css-ue6h4q, .stSelectbox div[data-baseweb="select"] {color: var(--text) !important;}
-.sidebar .sidebar-content {background: var(--card);}
+div[data-baseweb="input"] input, .stTextArea textarea, .stSelectbox div, .stNumberInput input, .stMultiSelect div {color: var(--text) !important;}
 .stButton>button {background: var(--accent); color:#111; font-weight:700; border-radius:12px; padding:0.6rem 1rem;}
 .stTabs [data-baseweb="tab-list"] {gap:8px;}
 .stTabs [data-baseweb="tab"] {background:var(--card); border-radius:999px; padding:8px 14px; border:1px solid #2a2a33; color:var(--text);}
@@ -39,6 +37,14 @@ def get_client():
     creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
 
+def share_if_needed(sh):
+    emails = [e.strip() for e in st.secrets.get("SHARE_WITH_EMAILS", "").split(",") if e.strip()]
+    for e in emails:
+        try:
+            sh.share(e, perm_type="user", role="writer", notify=False)
+        except Exception:
+            pass
+
 def get_sheet():
     gc = get_client()
     title = st.secrets.get("SPREADSHEET_TITLE","Dom Barber Shop")
@@ -46,6 +52,7 @@ def get_sheet():
         sh = gc.open(title)
     except Exception:
         sh = gc.create(title)
+    share_if_needed(sh)
     return sh
 
 def ensure_ws(sh, title, headers):
@@ -73,6 +80,9 @@ def number(x):
     except:
         return 0.0
 
+def norm_phone(s):
+    return "".join([c for c in str(s) if c.isdigit()])
+
 sh = get_sheet()
 ws_clientes = ensure_ws(sh, "Clientes", ["id","nome","telefone","email","nascimento","criado_em"])
 ws_barbeiros = ensure_ws(sh, "Barbeiros", ["nome","telefone","comissao","ativo","criado_em"])
@@ -87,11 +97,16 @@ df_atend = load_df(ws_atend)
 st.sidebar.markdown('<div class="card"><h3 style="margin-top:0;color:#f2f2f2;">💈 Dom Barber Shop</h3><div class="badge">Sistema</div></div>', unsafe_allow_html=True)
 modo = st.sidebar.radio("Acesso", ["Barbeiro","Dono"], horizontal=True)
 st.sidebar.divider()
-st.sidebar.markdown("**Planilha:**")
+if st.sidebar.button("Compartilhar planilha agora"):
+    try:
+        share_if_needed(sh)
+        st.sidebar.success("Planilha compartilhada.")
+    except Exception as e:
+        st.sidebar.error(f"Erro: {e}")
 try:
     st.sidebar.link_button("Abrir no Google Sheets", sh.url)
 except:
-    st.sidebar.write("Configure o Google Sheets nas `secrets`.")
+    st.sidebar.write("Configure os Secrets.")
 
 st.markdown('<div class="header"><h1>💈 Dom Barber Shop</h1><div class="badge">Visual Premium</div></div>', unsafe_allow_html=True)
 
@@ -100,9 +115,9 @@ if modo == "Barbeiro":
     with colA:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         lista_barbeiros = [""] + sorted(df_barbeiros[df_barbeiros["ativo"].astype(str).str.lower().eq("true")]["nome"].tolist()) if not df_barbeiros.empty else [""]
-        barbeiro_nome = st.selectbox("Barbeiro", options=lista_barbeiros, index=0, placeholder="Selecione ou digite")
+        barbeiro_nome = st.selectbox("Barbeiro", options=lista_barbeiros, index=0, placeholder="Selecione")
         if barbeiro_nome == "":
-            barbeiro_nome = st.text_input("Novo Barbeiro (caso não esteja na lista)", "")
+            barbeiro_nome = st.text_input("Novo Barbeiro", "")
             if st.button("Cadastrar Barbeiro"):
                 if barbeiro_nome.strip():
                     append_row(ws_barbeiros, [barbeiro_nome.strip(),"","0.0","True",datetime.now(tz).isoformat()])
@@ -116,11 +131,11 @@ if modo == "Barbeiro":
             nome = st.text_input("Nome do Cliente")
             telefone = st.text_input("Telefone")
             email = st.text_input("Email")
-            nascimento = st.date_input("Nascimento", value=None)
+            nascimento = st.text_input("Nascimento (AAAA-MM-DD) [opcional]")
             servicos_opts = sorted(df_servicos[df_servicos["ativo"].astype(str).str.lower().eq("true")]["servico"].tolist()) if not df_servicos.empty else []
-            serv = st.selectbox("Serviço", options=servicos_opts, index=0 if servicos_opts else None, placeholder="Cadastrar em 'Serviços' no acesso Dono")
+            serv = st.selectbox("Serviço", options=servicos_opts if servicos_opts else ["Cadastre serviços no acesso Dono"], index=0)
             preco_base = 0.0
-            if serv:
+            if serv and serv in servicos_opts:
                 row = df_servicos[df_servicos["servico"]==serv].head(1)
                 preco_base = number(row["preco"].iloc[0]) if not row.empty else 0.0
             valor = st.number_input("Valor (R$)", value=float(preco_base), min_value=0.0, step=1.0, format="%.2f")
@@ -129,9 +144,9 @@ if modo == "Barbeiro":
             enviar = st.form_submit_button("Salvar e Registrar Atendimento")
         if enviar:
             if not barbeiro_nome.strip():
-                st.error("Informe o nome do Barbeiro.")
-            elif not nome.strip() or not serv:
-                st.error("Informe nome do cliente e selecione o serviço.")
+                st.error("Informe o Barbeiro.")
+            elif not nome.strip() or (serv not in servicos_opts):
+                st.error("Informe nome do cliente e selecione um serviço válido.")
             else:
                 now = datetime.now(tz)
                 hoje = now.date().isoformat()
@@ -145,12 +160,13 @@ if modo == "Barbeiro":
                         next_id = len(df_clientes)+1
                 cli_exist = None
                 if not df_clientes.empty and telefone.strip():
-                    m = df_clientes["telefone"].astype(str).str.replace(r"\D","",regex=True)==pd.Series([telefone]).astype(str).str.replace(r"\D","",regex=True).iloc[0]
+                    tgt = norm_phone(telefone)
+                    m = df_clientes["telefone"].astype(str).apply(norm_phone)==tgt
                     if m.any():
                         cli_exist = df_clientes[m].iloc[0]
                         next_id = cli_exist["id"]
                 if cli_exist is None:
-                    append_row(ws_clientes, [str(next_id), nome.strip(), telefone.strip(), email.strip(), nascimento.isoformat() if isinstance(nascimento,date) else "", now.isoformat()])
+                    append_row(ws_clientes, [str(next_id), nome.strip(), telefone.strip(), email.strip(), nascimento.strip(), now.isoformat()])
                 append_row(ws_atend, [hoje, hora, barbeiro_nome.strip(), str(next_id), nome.strip(), serv, float(valor), pagamento, obs.strip(), now.isoformat()])
                 st.success("Cliente salvo e atendimento registrado.")
                 st.rerun()
@@ -162,8 +178,7 @@ if modo == "Barbeiro":
         st.info("Sem atendimentos.")
     else:
         today = datetime.now(tz).date().isoformat()
-        dfa = df_atend.copy()
-        dfa_today = dfa[dfa["data"]==today]
+        dfa_today = df_atend[df_atend["data"]==today].copy()
         if barbeiro_nome.strip():
             dfa_today = dfa_today[dfa_today["barbeiro"]==barbeiro_nome.strip()]
         c1,c2,c3 = st.columns(3)
@@ -181,98 +196,4 @@ else:
     with tabs[0]:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         if df_atend.empty:
-            st.info("Sem dados de atendimentos.")
-        else:
-            dfa = df_atend.copy()
-            dfa["valor"] = dfa["valor"].apply(number)
-            cortes_dia = dfa.groupby("data").size().reset_index(name="cortes")
-            finan_dia = dfa.groupby("data")["valor"].sum().reset_index(name="receita")
-            c1,c2 = st.columns(2)
-            c1.subheader("Cortes por dia")
-            c1.dataframe(cortes_dia.sort_values("data", ascending=False), use_container_width=True)
-            c2.subheader("Financeiro por dia (R$)")
-            c2.dataframe(finan_dia.sort_values("data", ascending=False), use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with tabs[1]:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        if df_atend.empty:
-            st.info("Sem dados para dashboards.")
-        else:
-            dfa = df_atend.copy()
-            dfa["valor"] = dfa["valor"].apply(number)
-            dfa["data"] = pd.to_datetime(dfa["data"], errors="coerce")
-            ult = dfa[dfa["data"]>= (pd.Timestamp(datetime.now(tz).date()) - pd.Timedelta(days=30))]
-            k1,k2,k3,k4 = st.columns(4)
-            total_at = len(ult)
-            receita = ult["valor"].sum()
-            ticket = (receita/total_at) if total_at>0 else 0.0
-            barbeiros_ativos = ult["barbeiro"].nunique()
-            k1.markdown(f'<div class="kpi"><h3>Atendimentos (30d)</h3><div class="v">{total_at}</div></div>', unsafe_allow_html=True)
-            k2.markdown(f'<div class="kpi"><h3>Receita (30d)</h3><div class="v">{receita:,.2f}</div></div>', unsafe_allow_html=True)
-            k3.markdown(f'<div class="kpi"><h3>Ticket Médio</h3><div class="v">{ticket:,.2f}</div></div>', unsafe_allow_html=True)
-            k4.markdown(f'<div class="kpi"><h3>Barbeiros Ativos</h3><div class="v">{barbeiros_ativos}</div></div>', unsafe_allow_html=True)
-            g1,g2 = st.columns(2)
-            by_day = ult.groupby(ult["data"].dt.date).agg(atend=("servico","size"), receita=("valor","sum")).reset_index().rename(columns={"data":"dia"})
-            fig1 = px.line(by_day, x="data", y="atend", markers=True, title="Atendimentos por dia")
-            fig2 = px.line(by_day, x="data", y="receita", markers=True, title="Receita por dia (R$)")
-            g1.plotly_chart(fig1, use_container_width=True)
-            g2.plotly_chart(fig2, use_container_width=True)
-            svc = ult.groupby("servico")["valor"].sum().reset_index().sort_values("valor", ascending=False)
-            fig3 = px.pie(svc, names="servico", values="valor", title="Receita por serviço")
-            st.plotly_chart(fig3, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with tabs[2]:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Cadastro de Barbeiro")
-        with st.form("form_barbeiro"):
-            b_nome = st.text_input("Nome do Barbeiro")
-            b_tel = st.text_input("Telefone")
-            b_com = st.number_input("Comissão (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0, format="%.2f")
-            b_ativo = st.checkbox("Ativo", value=True)
-            b_enviar = st.form_submit_button("Salvar Barbeiro")
-        if b_enviar and b_nome.strip():
-            append_row(ws_barbeiros, [b_nome.strip(), b_tel.strip(), str(b_com), "True" if b_ativo else "False", datetime.now(tz).isoformat()])
-            st.success("Barbeiro cadastrado.")
-            st.rerun()
-        st.divider()
-        st.subheader("Lista")
-        if df_barbeiros.empty:
-            st.info("Sem registros.")
-        else:
-            st.dataframe(df_barbeiros.sort_values("criado_em", ascending=False), use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with tabs[3]:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Cadastro de Serviço")
-        with st.form("form_serv"):
-            s_nome = st.text_input("Serviço")
-            s_preco = st.number_input("Preço (R$)", min_value=0.0, step=1.0, format="%.2f")
-            s_desc = st.text_input("Descrição")
-            s_ativo = st.checkbox("Ativo", value=True)
-            s_enviar = st.form_submit_button("Salvar Serviço")
-        if s_enviar and s_nome.strip():
-            append_row(ws_servicos, [s_nome.strip(), float(s_preco), s_desc.strip(), "True" if s_ativo else "False", datetime.now(tz).isoformat()])
-            st.success("Serviço cadastrado.")
-            st.rerun()
-        st.divider()
-        st.subheader("Lista")
-        if df_servicos.empty:
-            st.info("Sem registros.")
-        else:
-            st.dataframe(df_servicos.sort_values("criado_em", ascending=False), use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with tabs[4]:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Dados Brutos")
-        c1,c2 = st.columns(2)
-        with c1:
-            st.markdown("**Clientes**")
-            st.dataframe(df_clientes, use_container_width=True)
-            st.markdown("**Barbeiros**")
-            st.dataframe(df_barbeiros, use_container_width=True)
-        with c2:
-            st.markdown("**Serviços**")
-            st.dataframe(df_servicos, use_container_width=True)
-            st.markdown("**Atendimentos**")
-            st.dataframe(df_atend, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.info("Sem dados de ate
